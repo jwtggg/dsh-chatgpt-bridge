@@ -1,6 +1,6 @@
 import { test, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { RuntimeManager, deriveOverallStatus, isLatchedLifecycleError, confirmsRuntimeGone } from '../../lib/control/runtime-manager.js';
@@ -94,6 +94,45 @@ async function makeManager(overrides = {}) {
   created.push({ server: { close: (cb) => cb() }, tmp });
   return { tmp, fake, manager };
 }
+
+test('runtime-manager: a corrupt runtime-config.json cannot kill the host on activate()', async () => {
+  // Regression: activate() used to start the poll timer and an initial refresh
+  // without a rejection handler. ConfigStore.load() throws on malformed JSON, so
+  // one bad byte file became an unhandled rejection that terminated DSH itself
+  // ("dsh: fatal load failure") rather than merely disabling this plugin.
+  const tmp = mkdtempSync(join(process.cwd(), '.ctrl-mgr-corrupt-'));
+  created.push({ server: { close: (cb) => cb() }, tmp });
+  mkdirSync(join(tmp, 'chatgpt-bridge'), { recursive: true });
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(tmp, 'chatgpt-bridge', 'runtime-config.json'), '{ this is not json', 'utf8');
+
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const warnings = [];
+  const manager = new RuntimeManager({
+    dshHome: tmp,
+    bridge: { url: 'http://127.0.0.1:1/mcp', token: 'test-token', authMode: 'token' },
+    createRuntime: () => new FakeTunnelRuntime(),
+    pollIntervalMs: 50,
+    readyTimeoutMs: 200,
+    discover: () => ({}),
+    logger: { debug() {}, info() {}, warn: (message) => warnings.push(message), error() {} },
+  });
+  try {
+    // activate() must not throw, and must not schedule an auto-start.
+    manager.activate();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(unhandled, [], `unhandled rejections: ${unhandled.map(String).join('; ')}`);
+    assert.ok(warnings.some((line) => /runtime-config\.json/.test(line)),
+      `a corrupt config must be reported, got: ${JSON.stringify(warnings)}`);
+    // The manager stays usable and still answers from its last good snapshot.
+    assert.equal(typeof manager.getSnapshot().overall.status, 'string');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await manager.dispose();
+  }
+});
 
 test('runtime-manager: start reaches ready', async () => {
   const { fake, manager } = await makeManager({ discover: () => ({}) });

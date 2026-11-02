@@ -321,6 +321,53 @@ test('waitGoal still-running returns after bound with continuation (Case 3)', as
   assert.equal(waited.next_tool_call.name, 'dsh_wait_goal');
 });
 
+test('waitGoal maxGoalWaits cap ends the turn after N continuations', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  // Rebuild with a cap: makeStatefulBridge does not forward cfg, so set it directly.
+  bridge.cfg = { ...bridge.cfg, maxGoalWaits: 2 };
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'g' });
+  const agent = agents.get(started.session_id);
+  agent.status = 'running';
+  agent.inbox.hasPending = false;
+  let t = 0;
+  bridge.now = () => t;
+  bridge.sleep = async (ms) => { t += ms; };
+
+  const first = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(first.continuation_required, true);
+  assert.equal(first.wait_budget_exhausted, undefined);
+  assert.equal(first.next_tool_call.name, 'dsh_wait_goal');
+
+  const second = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(second.continuation_required, false, 'cap reached: the turn may end');
+  assert.equal(second.wait_budget_exhausted, true);
+  assert.equal(second.next_tool_call, undefined);
+  assert.match(second.next_action, /End the assistant turn now/);
+  assert.equal(second.terminal, false);
+
+  // The budget resets, so a later batch gets a fresh allowance.
+  const third = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(third.continuation_required, true);
+  assert.equal(third.wait_budget_exhausted, undefined);
+});
+
+test('maxGoalWaits = 0 means unlimited', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  bridge.cfg = { ...bridge.cfg, maxGoalWaits: 0 };
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'g' });
+  const agent = agents.get(started.session_id);
+  agent.status = 'running';
+  agent.inbox.hasPending = false;
+  let t = 0;
+  bridge.now = () => t;
+  bridge.sleep = async (ms) => { t += ms; };
+  for (let i = 0; i < 5; i += 1) {
+    const waited = await bridge.waitGoal(started.session_id, 1);
+    assert.equal(waited.continuation_required, true);
+    assert.equal(waited.wait_budget_exhausted, undefined);
+  }
+});
+
 test('waitGoal completed is terminal (Case 4)', async () => {
   const { bridge, agents } = makeStatefulBridge();
   const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'g' });
@@ -519,14 +566,18 @@ function settle(agent) {
   agent.inbox.nextTurn = [];
 }
 
-test('MCP surface exposes 23 dsh_* tools (v0.5.0 Control Plane Reliability)', async () => {
+test('MCP surface exposes 26 dsh_* tools (v0.5.0 Control Plane Reliability)', async () => {
   const src = await import('node:fs');
   const text = src.readFileSync(new URL('../../src/mcp.ts', import.meta.url), 'utf8');
-  const count = [...text.matchAll(/server\.registerTool\(/g)].length;
-  assert.equal(count, 23);
+  // Tool registrations go through the local `register()` wrapper, which is what
+  // applies the disableGoalTools filter; count those call sites.
+  const count = [...text.matchAll(/(?<!\.)\bregister\(/g)].length;
+  assert.equal(count, 26);
   assert.match(text, /dsh_update_goal/);
   assert.match(text, /dsh_create_goal/);
   assert.match(text, /dsh_revise_goal/);
+  assert.match(text, /disableGoalTools/);
+  assert.match(text, /GOAL_TOOLS/);
 });
 
 test('Test A — waitGoal/terminal reconciles pending push todo after git push succeeds', async () => {

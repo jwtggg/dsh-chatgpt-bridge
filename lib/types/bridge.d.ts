@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
+import { type ModelBrief, type ModelCatalogView, type ModelSource, type SessionModelView, type SetSessionModelResult } from './model-control.js';
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval';
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions';
 import type { Workspace } from '@deepseek-ai/dsh-workspace';
@@ -130,6 +131,10 @@ export interface SessionView {
     title?: string;
     workspace?: string;
     status: BridgeStatus;
+    /** Effective model of this session; `null` when neither the log nor the default names one. */
+    model?: ModelBrief | null;
+    /** How `model` was derived: a queued selection, the last request, or the host default. */
+    model_from?: ModelSource;
     created_at: string;
     updated_at?: string;
     agent?: {
@@ -166,6 +171,10 @@ export interface SessionSummary {
     title?: string;
     workspace?: string;
     status?: BridgeStatus;
+    /** Effective model of this session, when the log or the host default names one. */
+    model?: ModelBrief | null;
+    /** How `model` was derived: a queued selection, the last request, or the host default. */
+    model_from?: ModelSource;
     created_at: string;
     updated_at?: string;
 }
@@ -204,6 +213,15 @@ export declare class Bridge {
     private apiProxy;
     private muxAbort;
     private webOwnsApprovals;
+    /**
+     * Consecutive dsh_wait_goal continuations per session, used by the optional
+     * maxGoalWaits cap. Reset by any non-continuation result and by every new
+     * goal/message, so the cap bounds ONE uninterrupted supervision chain (one
+     * assistant turn) without limiting later turns.
+     */
+    private readonly goalWaitBudget;
+    /** Agent-scoped selection refs keyed by session id, cleaned up on agent disposal. */
+    private readonly managedSelections;
     readonly workspaceGuard: WorkspaceConcurrencyGuard;
     readonly idempotencyManager: ExecutionIdempotencyManager;
     private readonly workspaceBaselines;
@@ -223,8 +241,50 @@ export declare class Bridge {
     /** Count of bridge-created sessions still live. */
     managedCount(): number;
     private agentOptions;
-    /** Agent-scoped model selection with log-derived fallback for resumes. */
+    /**
+     * Agent-scoped model selection with log-derived fallback for resumes.
+     *
+     * `current` is read lazily on purpose: a resume replays the persisted log
+     * *after* setup runs, and the first prompt assembly happens later still, so
+     * reading the header eagerly would freeze a resumed session onto the profile
+     * default instead of the model it actually ran on. A value the bridge set via
+     * `setSessionModel` is remembered and always wins.
+     */
     private installSelection;
+    /**
+     * Resolve the profile's live LLM registry into the catalog ChatGPT selects
+     * from. Read-only: it never requests credentials and never returns an API key,
+     * token or endpoint secret — only ids, display names and declared capabilities.
+     */
+    listModels(): Promise<ModelCatalogView>;
+    /** The selection ref the bridge owns for one live agent, when it installed one. */
+    private selectionFor;
+    /**
+     * Model-selection state of one session. The log fold is the durable truth for
+     * both live and cold sessions; a bridge-owned ref that has moved ahead of the
+     * log is what DSH will actually assemble the next request from, so it wins.
+     */
+    private modelStateOf;
+    private defaultModelBrief;
+    /**
+     * Read the model one specified session runs on. Read-only: it reports the
+     * effective model, where it came from, and what the most recent request
+     * actually used, so a caller can tell "will use" from "already used".
+     */
+    getSessionModel(sessionId: string): Promise<SessionModelView>;
+    /**
+     * Change the model of ONE specified session. Never creates a new conversation,
+     * never migrates history, never touches the global default, never sends a
+     * message and never cancels or restarts a running turn: the selection is
+     * recorded in the session log through DSH's own `model/selection` event and
+     * applied by DSH at the next prompt assembly of that same session.
+     */
+    setSessionModel(input: {
+        session_id: string;
+        model_id: string;
+        provider_id?: string;
+        thinking_level?: string;
+    }): Promise<SetSessionModelResult>;
     /** Compose the preset+selection setup used at agent creation/resume. */
     private composeSetupFor;
     private loadView;
@@ -257,6 +317,12 @@ export declare class Bridge {
         offset?: number;
         workspace?: string;
     }): Promise<SessionSummary[]>;
+    /**
+     * Zero-I/O effective model for a cold session, read from the persisted
+     * projection cache when it is mounted. Never reads the log: this is a listing
+     * hint that a later `dsh_get_session_model` read supersedes.
+     */
+    private cachedModel;
     /** Zero-I/O cached title for a cold session, when a projection cache is mounted. */
     private cachedTitle;
     getResult(sessionId: string, maxChars?: number): Promise<ResultView>;
@@ -346,6 +412,16 @@ export declare class Bridge {
         workspace_lock_override?: boolean;
     }): Promise<GoalStartResult>;
     waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult>;
+    /**
+     * Enforce the optional maxGoalWaits cap. A supervised goal keeps returning
+     * continuation_required=true, which makes ChatGPT call dsh_wait_goal again in
+     * the SAME assistant turn; on a connector with a hard per-turn time limit
+     * that loop is what eventually drops the conversation. When the cap is
+     * reached this returns continuation_required=false plus an explicit
+     * next_action telling the model to end the turn and report progress, so the
+     * user can say "continue" for the next bounded batch.
+     */
+    private applyGoalWaitBudget;
     stopGoal(sessionId: string): Promise<{
         session_id: string;
         stopped: true;

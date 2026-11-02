@@ -27,6 +27,19 @@ export declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     sessionMaxItems: z<number, number, "defined">;
     /** Max characters per message text returned by dsh_get_session. */
     sessionMaxChars: z<number, number, "defined">;
+    /**
+     * Hide every supervised-Goal tool (dsh_start_goal, dsh_wait_goal, ...).
+     * ChatGPT then sees the plain session tools only. Use when the Goal
+     * continuation loop (a single assistant turn that keeps calling
+     * dsh_wait_goal) exceeds what the connector tolerates.
+     */
+    disableGoalTools: z<boolean, boolean, "defined">;
+    /**
+     * Cap how many consecutive dsh_wait_goal continuations one assistant turn may
+     * make (0 = unlimited). When the budget is spent the tool returns
+     * continuation_required=false so the turn can end and report progress.
+     */
+    maxGoalWaits: z<number, number, "defined">;
     /** Log verbosity: debug | info | warn | error. */
     logLevel: z<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn", "defined">;
     /** Risk-tiered auto-approval policy. Omitted fields keep the safe defaults. */
@@ -78,6 +91,19 @@ export declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     sessionMaxItems: z<number, number, "defined">;
     /** Max characters per message text returned by dsh_get_session. */
     sessionMaxChars: z<number, number, "defined">;
+    /**
+     * Hide every supervised-Goal tool (dsh_start_goal, dsh_wait_goal, ...).
+     * ChatGPT then sees the plain session tools only. Use when the Goal
+     * continuation loop (a single assistant turn that keeps calling
+     * dsh_wait_goal) exceeds what the connector tolerates.
+     */
+    disableGoalTools: z<boolean, boolean, "defined">;
+    /**
+     * Cap how many consecutive dsh_wait_goal continuations one assistant turn may
+     * make (0 = unlimited). When the budget is spent the tool returns
+     * continuation_required=false so the turn can end and report progress.
+     */
+    maxGoalWaits: z<number, number, "defined">;
     /** Log verbosity: debug | info | warn | error. */
     logLevel: z<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn", "defined">;
     /** Risk-tiered auto-approval policy. Omitted fields keep the safe defaults. */
@@ -123,6 +149,8 @@ export interface BridgeConfigInput {
     sessionMaxChars?: number;
     logLevel?: LogLevel;
     approvalPolicy?: UserApprovalPolicy;
+    disableGoalTools?: boolean;
+    maxGoalWaits?: number;
 }
 /** Fully resolved configuration after token resolution. */
 export interface ResolvedBridgeConfig {
@@ -139,6 +167,8 @@ export interface ResolvedBridgeConfig {
     logLevel: LogLevel;
     dshHome: string;
     approvalPolicy?: UserApprovalPolicy;
+    disableGoalTools: boolean;
+    maxGoalWaits: number;
 }
 /** Convert URL authority host syntax to the bare form required by sockets. */
 export declare function normalizeSocketHostname(host: string): string;
@@ -151,3 +181,5 @@ export declare function bridgeHttpUrl(listenerHost: string, port: number): strin
 export declare function defaultDshHome(env: Record<string, string | undefined>): string;
 /** Resolve the effective configuration (defaults + token resolution). */
 export declare function resolveConfig(input: BridgeConfigInput, env: Record<string, string | undefined>): ResolvedBridgeConfig;
+/** 0 means unlimited; negative or non-finite input falls back to unlimited. */
+export declare function normalizeMaxGoalWaits(value: number | undefined): number;

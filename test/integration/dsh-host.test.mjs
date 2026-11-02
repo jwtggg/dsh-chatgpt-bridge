@@ -1,4 +1,4 @@
-// Run in a disposable copy with @deepseek-ai/dsh@0.2.0-rc.2 installed.
+// Run in a disposable copy with a supported @deepseek-ai/dsh host installed.
 // Real Cordis, AgentLoop, V3 JSONL, approvals and questions; no credentials or model adapter.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis';
 import Agents from '@deepseek-ai/dsh-agent';
 import AgentLoop from '@deepseek-ai/dsh-agent-loop';
 import Sessions, { SessionId } from '@deepseek-ai/dsh-session';
-import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
+import * as PersistenceModule from '@deepseek-ai/dsh-session-persistence-jsonl';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
@@ -18,6 +18,12 @@ import Questions from '@deepseek-ai/dsh-user-questions';
 import Approval from '@deepseek-ai/dsh-user-approval';
 import Title from '@deepseek-ai/dsh-session-title';
 import { Bridge } from '../../lib/bridge.js';
+
+// `dsh-session-persistence-jsonl` shipped a default export through 0.2.0 and
+// became a plain Cordis plugin row (`apply`/`name`/`Config`) in 0.2.1. Accept
+// either shape so the contract test runs on every supported host instead of
+// failing on a packaging-only change the bridge never depended on.
+const Persistence = PersistenceModule.default ?? PersistenceModule.apply ?? PersistenceModule;
 
 test('real DSH: explicit setup, V3 read/cold resume, question/approval and teardown', { timeout: 30000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'bridge-dsh-contract-'));

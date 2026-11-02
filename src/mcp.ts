@@ -71,13 +71,45 @@ function safe<A>(handler: (args: A) => Promise<unknown>) {
   };
 }
 
+/**
+ * Every tool that belongs to the supervised-Goal continuation protocol.
+ * `disableGoalTools` removes exactly these, leaving the plain session surface.
+ */
+export const GOAL_TOOLS: readonly string[] = [
+  'dsh_create_goal',
+  'dsh_pause_goal',
+  'dsh_rerun_step',
+  'dsh_resume_goal',
+  'dsh_retry_step',
+  'dsh_revise_goal',
+  'dsh_start_goal',
+  'dsh_stop_goal',
+  'dsh_update_goal',
+  'dsh_wait_goal',
+  'dsh_wait_until_action_required',
+];
+
 export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: BridgeLogger): McpServer {
   const server = new McpServer(
     { name: BRIDGE_NAME, version: BRIDGE_VERSION },
     { capabilities: { tools: {} } },
   );
+  const goalToolsEnabled = cfg.disableGoalTools !== true;
 
-  server.registerTool(
+  /**
+   * Register one tool, then drop it again when the supervised-Goal surface is
+   * disabled. `remove()` is the SDK's own unregister path (it deletes the tool
+   * from `_registeredTools` and notifies clients only when a transport is
+   * attached), so ChatGPT simply never sees the Goal tools and cannot enter the
+   * unbounded dsh_wait_goal continuation loop inside one assistant turn.
+   */
+  const register: McpServer['registerTool'] = ((name, config, cb) => {
+    const tool = server.registerTool(name, config, cb);
+    if (!goalToolsEnabled && GOAL_TOOLS.includes(name)) tool.remove();
+    return tool;
+  }) as McpServer['registerTool'];
+
+  register(
     'dsh_health',
     {
       title: 'DSH bridge health',
@@ -89,7 +121,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async () => bridge.health()),
   );
 
-  server.registerTool(
+  register(
     'dsh_list_workspaces',
     {
       title: 'List registered workspaces',
@@ -101,7 +133,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async () => bridge.listWorkspaces()),
   );
 
-  server.registerTool(
+  register(
     'dsh_create_session',
     {
       title: 'Create a DSH session',
@@ -119,7 +151,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.createSession(args.workspace, args.title, args.initial_message)),
   );
 
-  server.registerTool(
+  register(
     'dsh_list_sessions',
     {
       title: 'List DSH sessions',
@@ -136,7 +168,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.listSessions({ limit: args.limit, offset: args.offset, workspace: args.workspace })),
   );
 
-  server.registerTool(
+  register(
     'dsh_get_session',
     {
       title: 'Inspect one DSH session',
@@ -153,7 +185,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.getSession(args.session_id, args.max_items, args.max_chars)),
   );
 
-  server.registerTool(
+  register(
     'dsh_send_message',
     {
       title: 'Send a message to a DSH session',
@@ -170,7 +202,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.sendMessage(args.session_id, args.message)),
   );
 
-  server.registerTool(
+  register(
     'dsh_get_task_status',
     {
       title: 'Task status of one session',
@@ -184,7 +216,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async (args: { session_id: string }) => bridge.getTaskStatus(args.session_id)),
   );
 
-  server.registerTool(
+  register(
     'dsh_get_result',
     {
       title: 'Final result of the last turn',
@@ -201,7 +233,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.getResult(args.session_id, args.max_chars)),
   );
 
-  server.registerTool(
+  register(
     'dsh_cancel_task',
     {
       title: 'Cancel the running task',
@@ -215,7 +247,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async (args: { session_id: string }) => bridge.cancelTask(args.session_id)),
   );
 
-  server.registerTool(
+  register(
     'dsh_answer_question',
     {
       title: 'Answer a pending user question',
@@ -234,7 +266,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.answerQuestion(args.question_id, args.session_id, { selected: args.selected, custom: args.custom })),
   );
 
-  server.registerTool(
+  register(
     'dsh_approve',
     {
       title: 'Decide one pending approval',
@@ -252,7 +284,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.approve(args.session_id, args.approval_id, args.decision)),
   );
 
-  server.registerTool(
+  register(
     'dsh_create_goal',
     {
       title: 'Create a supervised DSH goal',
@@ -281,7 +313,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.createGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
-  server.registerTool(
+  register(
     'dsh_revise_goal',
     {
       title: 'Revise a supervised DSH goal',
@@ -312,7 +344,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.reviseGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
-  server.registerTool(
+  register(
     'dsh_pause_goal',
     {
       title: 'Pause a supervised DSH goal',
@@ -322,7 +354,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async (args: { session_id: string }) => bridge.pauseGoal(args.session_id)),
   );
 
-  server.registerTool(
+  register(
     'dsh_resume_goal',
     {
       title: 'Resume a paused/deferred DSH goal',
@@ -342,7 +374,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.resumeGoal(args.session_id, args.resume_steps, args.request_id, args.workspace_lock_override)),
   );
 
-  server.registerTool(
+  register(
     'dsh_retry_step',
     {
       title: 'Retry a blocked or failed step',
@@ -362,7 +394,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.retryStep(args.session_id, args.step_id, args.request_id, args.workspace_lock_override)),
   );
 
-  server.registerTool(
+  register(
     'dsh_rerun_step',
     {
       title: 'Rerun or re-verify a step',
@@ -382,7 +414,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.rerunStep(args.session_id, args.step_id, args.request_id, args.workspace_lock_override)),
   );
 
-  server.registerTool(
+  register(
     'dsh_wait_until_action_required',
     {
       title: 'Long wait on supervised Goal until action is required',
@@ -397,7 +429,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.waitUntilActionRequired(args.session_id, args.wait_seconds)),
   );
 
-  server.registerTool(
+  register(
     'dsh_credential_status',
     {
       title: 'Check credential availability (secret-safe)',
@@ -407,7 +439,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     safe(async () => bridge.getCredentialStatus()),
   );
 
-  server.registerTool(
+  register(
     'dsh_start_goal',
     {
       title: 'Start a supervised DSH goal',
@@ -447,7 +479,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.startGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
-  server.registerTool(
+  register(
     'dsh_update_goal',
     {
       title: 'Revise, defer, or resume a supervised Goal',
@@ -492,7 +524,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     }) => bridge.updateGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
-  server.registerTool(
+  register(
     'dsh_wait_goal',
     {
       title: 'Wait on a supervised DSH goal',
@@ -512,7 +544,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       bridge.waitGoal(args.session_id, args.wait_seconds)),
   );
 
-  server.registerTool(
+  register(
     'dsh_stop_goal',
     {
       title: 'Stop a supervised DSH goal',
@@ -524,6 +556,69 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       inputSchema: z.object({ session_id: z.string().min(1) }),
     },
     safe(async (args: { session_id: string }) => bridge.stopGoal(args.session_id)),
+  );
+
+  register(
+    'dsh_list_models',
+    {
+      title: 'List selectable DSH models',
+      description:
+        'List every provider and model this DSH profile currently advertises, read from the live ' +
+        'provider registry (never a hardcoded list). Use it to pick a model_id / provider_id for ' +
+        'dsh_set_session_model. Each model reports availability, whether it can be switched in the ' +
+        'same session, its supported thinking levels and default level. Never returns API keys, ' +
+        'tokens or endpoints. A model that cannot be resolved is reported as available=false with a ' +
+        'reason instead of being silently dropped.',
+      inputSchema: z.object({}),
+    },
+    safe(async () => bridge.listModels()),
+  );
+
+  register(
+    'dsh_get_session_model',
+    {
+      title: 'Read one DSH session model',
+      description:
+        'Report which model one SPECIFIED DSH session (session_id) will use on its next message, ' +
+        'where that choice came from (a queued selection / the last request / the profile default), ' +
+        'and which model its most recent request actually used. Read-only: it changes nothing and ' +
+        'never creates a session. `pending` is a selection not yet used — when it differs from ' +
+        '`last_request` the switch has been saved but has not reached the wire yet.',
+      inputSchema: z.object({
+        session_id: z.string().min(1).describe('Existing DSH session id (see dsh_list_sessions)'),
+      }),
+    },
+    safe(async (args: { session_id: string }) => bridge.getSessionModel(args.session_id)),
+  );
+
+  register(
+    'dsh_set_session_model',
+    {
+      title: 'Change one DSH session model',
+      description:
+        'Change the model of ONE specified DSH session (session_id) without creating a new ' +
+        'conversation and without touching the profile default or any other session. The conversation, ' +
+        'its history, its workspace, its Goal state and its id are preserved; no message is sent and no ' +
+        'running task is cancelled or restarted. The saved selection takes effect on the NEXT message ' +
+        'of that session (DSH applies it at the next prompt assembly). Returns the before/after state ' +
+        're-read from DSH, so a saved-but-not-yet-effective change is visible as pending rather than ' +
+        'reported as applied. Validate model_id/provider_id with dsh_list_models first. thinking_level ' +
+        'is optional and must be supported by the target model.',
+      inputSchema: z.object({
+        session_id: z.string().min(1).describe('Existing DSH session id whose model should change'),
+        model_id: z.string().min(1).describe('Target model id, exactly as dsh_list_models reports it'),
+        provider_id: z.string().min(1).optional()
+          .describe('Target provider route; required when the session has no model yet'),
+        thinking_level: z.string().min(1).optional()
+          .describe('Reasoning level id from the target model thinking_levels (optional)'),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      model_id: string;
+      provider_id?: string;
+      thinking_level?: string;
+    }) => bridge.setSessionModel(args)),
   );
 
   return server;

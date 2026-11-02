@@ -1,13 +1,108 @@
 # Changelog
 
+## Unreleased — DSH 0.2.1-rc.5 compatibility
+
+DSH 0.2.1-rc.5 refused to load the published 0.6.0 plugin outright:
+
+> dsh-chatgpt-bridge@0.6.0 is incompatible with DSH 0.2.1-rc.5 (requires
+> @deepseek-ai/dsh-llm 0.2.0-rc.2, ...). Running it may cause crashes or data
+> loss. Uninstall and reinstall a version compatible with this DSH.
+
+### Why it broke
+
+DSH's install gate (`evaluatePluginCompatibility` in `@deepseek-ai/dsh-app-boot`)
+decides compatibility from the plugin manifest alone, before any plugin code
+runs. An own `engines.dsh` range decides alone and peer dependencies are then
+ignored; otherwise EVERY `@deepseek-ai/dsh`/`@deepseek-ai/dsh-*` peer must
+satisfy the running runtime version. The manifest pinned five peers to the
+exact `0.2.0-rc.2` host, so every later host release rejected the plugin — not
+because its API usage had broken, but because the pin had gone stale.
+
+### Compatibility window instead of an exact pin
+
+- `package.json` now declares `engines.dsh` and the five DSH peers as
+  `>=0.2.0-rc.2 <=0.2.1-rc.5 || ^0.2.1-rc.5`.
+- The window must satisfy two INDEPENDENT semver interpretations: DSH's gate
+  evaluates the runtime with `includePrerelease: true`, while npm/pnpm resolve
+  peers with default (prerelease-excluding) rules. A plain open range such as
+  `>=0.2.0-rc.2 <0.3.0` passes the gate but makes npm reject the very host it
+  must install, because no prerelease satisfies it under default semantics.
+  Naming the verified prereleases explicitly and OR-ing the release line is
+  what satisfies both readers.
+- `@deepseek-ai/cordis` moves to `~4.0.5` and `@deepseek-ai/schemastery` to
+  `3.18.5`, matching the 0.2.1-rc.5 host graph.
+- Development dependencies stay pinned to the one concrete host
+  (`0.2.1-rc.5`) so typecheck and integration runs are reproducible.
+
+### No host workarounds
+
+Nothing in the DSH installation is patched, downgraded or exempted, and no
+`compatibility.json` exemption is granted: the plugin declares what it supports
+and DSH's own gate accepts it.
+
+### Fixed
+
+- A corrupt `<dshHome>/chatgpt-bridge/runtime-config.json` no longer takes down
+  the whole DSH process. `RuntimeManager.activate()` started its poll timer and
+  initial refresh without a rejection handler, so the `ConfigStore.load()` throw
+  became an unhandled rejection and DSH exited with `fatal load failure`, losing
+  every unrelated session. The refresh now records the failure and logs it, and
+  auto-start stays disabled rather than aborting boot.
+
+### Verification
+
+- Typecheck and build against the 0.2.1-rc.5 host graph: clean.
+- Source suite: 420 tests, 417 passed, 0 failed, 3 skipped.
+- Installed-tarball release gate against the real `@deepseek-ai/dsh@0.2.1-rc.5`
+  host: 18/18 integration tests pass.
+- Real CLI end to end on 0.2.1-rc.5: the host boots with the plugin, the bridge
+  listens, MCP rejects an unauthenticated request with 401, `initialize`
+  succeeds, `tools/list` advertises 26 tools and `dsh_health` reports
+  `dsh.version = 0.2.1-rc.5`.
+- Control: reinstalling the previous exact-pin manifest on the same host
+  reproduces the original rejection, so the fix is the manifest change and not
+  a loosened check.
+
+### Corrected stale expectations
+
+- `dsh-session-persistence-jsonl` dropped its default export in 0.2.1 (it is now
+  a plain Cordis row with `apply`/`name`/`Config`); the host contract fixture
+  accepts either shape. The bridge never imported this package.
+- The CLI test asserted `capabilities.webSurface === true`. That flag reports
+  whether the OLD `apiProxy` mux mirror is attached, and
+  `@deepseek-ai/dsh-host-apiproxy` never shipped a 0.2.x release, so the flag is
+  `false` on every supported host. The assertion was written for 0.1.7-rc.2 and
+  had gone stale; it now asserts the capability surface that actually carries
+  approvals and questions.
+
 ## Unreleased — DSH 0.2.0-rc.2
 
+- Add two opt-in config keys that bound the supervised-Goal continuation loop,
+  which can keep one ChatGPT assistant turn open until the connector times out:
+  `disableGoalTools` (default `false`) removes the 11 Goal tools from the
+  advertised MCP surface, and `maxGoalWaits` (default `0` = unlimited) ends the
+  continuation chain after N consecutive `dsh_wait_goal` calls by returning
+  `continuation_required: false` with `wait_budget_exhausted: true` and a
+  `next_action` that tells the model to end the turn. `dsh_health` now reports
+  `capabilities.goalSupervision: false` when the Goal tools are disabled.
+  Default behaviour is unchanged.
+- Add three model-control tools: `dsh_list_models` (the profile's live provider
+  catalog with availability and thinking levels), `dsh_get_session_model` and
+  `dsh_set_session_model` (switch ONE named session in place). A switch appends
+  the native `model/selection` event to that session's own log and moves its
+  bridge-owned selection ref, so the same session id, history, workspace and
+  goal survive; the global default model and every other session are untouched.
+  Reports distinguish accepted, saved and actually-effective, and never fakes a
+  switch for a live session whose selection belongs to another DSH entry point.
+- Carry a brief `model`/`model_from` in `dsh_get_session` and `dsh_list_sessions`.
 - Pin DSH peer and development dependencies to the exact 0.2.0-rc.2 host.
 - Update lifecycle assertions and both lockfiles for that host graph.
 - Allow the settings form to save or clear an empty Tunnel ID while retaining
   validation of every nonempty ID; unconfigured proxy settings can be saved.
-- Verify typecheck/build, 400 passing tests (one Windows-only POSIX skip),
-  and real installed-tarball CLI/Web/MCP plus session lifecycle integration.
+- Verify typecheck/build, 413 tests (410 passed, 0 failed, 3 skipped: one
+  POSIX-permission case and two cross-process spawn cases blocked by the
+  sandbox), and real installed-tarball CLI/Web/MCP plus session lifecycle
+  integration.
 - Verify the actual browser settings page, dirty-edit polling, local save,
   reload persistence and restoration of the original proxy value.
 - Package version remains 0.6.0; these changes are not a published release.

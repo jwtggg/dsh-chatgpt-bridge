@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, cpSync, existsSync, realpathSync, rmSync } f
 import { tmpdir } from 'node:os';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -29,18 +30,35 @@ try {
   for (const path of ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts', 'cordis.patch.yml', 'LICENSE']) {
     assert.ok(packedPaths.has(path), `Missing package entry: ${path}`);
   }
-  const hostVersion = manifest.peerDependencies['@deepseek-ai/dsh-agent'];
-  assert.match(hostVersion, /^\d+\.\d+\.\d+-rc\.\d+$/);
+  // The peer range is the compatibility window; the release gate must install
+  // ONE concrete host that the window accepts, not parse a range as a version.
+  const hostVersion = manifest.devDependencies['@deepseek-ai/dsh-agent'];
+  assert.match(hostVersion, /^\d+\.\d+\.\d+-rc\.\d+$/, 'devDependencies must pin one exact host');
+  const peerWindow = manifest.peerDependencies['@deepseek-ai/dsh-agent'];
+  assert.ok(semver.satisfies(hostVersion, peerWindow, { includePrerelease: true }),
+    `peer window ${peerWindow} must accept the verified host ${hostVersion}`);
   // Fresh Windows runners can need more than five minutes to fetch the full
   // official host graph. Keep the contract-test subprocess on the short limit.
+  //
+  // The synthetic host tests import the individual DSH feature packages they
+  // mount. Recent official releases nest some of those under
+  // `@deepseek-ai/dsh-base` instead of hoisting them to the top level, so
+  // installing only the `dsh` meta package leaves them unresolvable. Name every
+  // package the tests import at the pinned host version to keep the gate
+  // independent of npm's hoisting outcome.
+  const hostPackages = ['dsh', 'dsh-agent', 'dsh-agent-loop', 'dsh-session',
+    'dsh-session-persistence-jsonl', 'dsh-session-projection', 'dsh-system-prompt',
+    'dsh-tools', 'dsh-llm', 'dsh-user-questions', 'dsh-user-approval', 'dsh-session-title'];
   run([npmCli, 'install', '--prefix', temp, '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false',
-    join(temp, pack.filename), `@deepseek-ai/dsh@${hostVersion}`], temp, false, 600000);
+    join(temp, pack.filename), ...hostPackages.map((name) => `@deepseek-ai/${name}@${hostVersion}`)],
+  temp, false, 600000);
   const installed = join(temp, 'node_modules', manifest.name);
   assert.equal(JSON.parse(readFileSync(join(installed, 'package.json'))).version, manifest.version);
   // Tests resolve both ../../lib and official dependencies from the installed
   // package. Copy only synthetic tests, never source/lib from the checkout.
   cpSync(join(root, 'test/integration'), join(installed, 'test/integration'), { recursive: true });
-  run(['--test', 'test/integration/dsh-host.test.mjs', 'test/integration/dsh-cli.test.mjs'], installed);
+  run(['--test', 'test/integration/dsh-host.test.mjs', 'test/integration/dsh-cli.test.mjs',
+    'test/integration/model-switch.test.mjs'], installed);
   console.log(`PACKED_RELEASE_OK ${manifest.name}@${manifest.version}: ${pack.files.length} files; DSH ${hostVersion}`);
   console.log(`Package integrity: ${pack.integrity}`);
 } finally {

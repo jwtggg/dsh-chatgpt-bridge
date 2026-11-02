@@ -94,8 +94,27 @@ export declare class RuntimeManager {
     private cachedDiscovery;
     private readonly discoverFn?;
     constructor(options: RuntimeManagerOptions);
-    /** Begin the poller and (when configured) schedule auto-start. */
+    /**
+     * Begin the poller and (when configured) schedule auto-start.
+     *
+     * Nothing here may throw or leak a rejection. `refresh()` reads
+     * `runtime-config.json`, and a malformed file makes `ConfigStore.load()`
+     * reject; an unhandled rejection from the poll timer or the initial refresh
+     * terminates the whole DSH process ("fatal load failure"), taking every
+     * unrelated session down with it. The control plane is a convenience surface:
+     * a broken config must degrade this plugin to "status unknown", never kill
+     * the host. `refresh()` therefore records the failure in the snapshot and
+     * reports it through the logger.
+     */
     activate(): void;
+    /**
+     * Refresh the snapshot, converting any failure into a recorded state.
+     *
+     * The poller and the boot-time refresh are fire-and-forget; this wrapper is
+     * what keeps a configuration or probe failure from becoming an unhandled
+     * rejection that ends the DSH process.
+     */
+    private refreshSafely;
     /** The current composite snapshot (the single status authority's view). */
     getSnapshot(): RuntimeSnapshot;
     getConfig(): RuntimeConfig;

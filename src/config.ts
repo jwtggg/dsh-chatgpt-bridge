@@ -32,6 +32,19 @@ export const ConfigSchema = z.object({
   sessionMaxItems: z.number().default(20),
   /** Max characters per message text returned by dsh_get_session. */
   sessionMaxChars: z.number().default(4000),
+  /**
+   * Hide every supervised-Goal tool (dsh_start_goal, dsh_wait_goal, ...).
+   * ChatGPT then sees the plain session tools only. Use when the Goal
+   * continuation loop (a single assistant turn that keeps calling
+   * dsh_wait_goal) exceeds what the connector tolerates.
+   */
+  disableGoalTools: z.boolean().default(false),
+  /**
+   * Cap how many consecutive dsh_wait_goal continuations one assistant turn may
+   * make (0 = unlimited). When the budget is spent the tool returns
+   * continuation_required=false so the turn can end and report progress.
+   */
+  maxGoalWaits: z.number().min(0).default(0),
   /** Log verbosity: debug | info | warn | error. */
   logLevel: z.union([z.const('debug'), z.const('info'), z.const('warn'), z.const('error')]).default('info'),
   /** Risk-tiered auto-approval policy. Omitted fields keep the safe defaults. */
@@ -79,6 +92,8 @@ export interface BridgeConfigInput {
   sessionMaxChars?: number;
   logLevel?: LogLevel;
   approvalPolicy?: UserApprovalPolicy;
+  disableGoalTools?: boolean;
+  maxGoalWaits?: number;
 }
 
 /** Fully resolved configuration after token resolution. */
@@ -96,6 +111,8 @@ export interface ResolvedBridgeConfig {
   logLevel: LogLevel;
   dshHome: string;
   approvalPolicy?: UserApprovalPolicy;
+  disableGoalTools: boolean;
+  maxGoalWaits: number;
 }
 
 /** Convert URL authority host syntax to the bare form required by sockets. */
@@ -257,6 +274,15 @@ export function resolveConfig(
     sessionMaxChars: input.sessionMaxChars ?? 4000,
     logLevel: input.logLevel ?? 'info',
     dshHome,
+    disableGoalTools: input.disableGoalTools === true,
+    maxGoalWaits: normalizeMaxGoalWaits(input.maxGoalWaits),
     ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
   };
+}
+
+/** 0 means unlimited; negative or non-finite input falls back to unlimited. */
+export function normalizeMaxGoalWaits(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  const n = Math.trunc(value);
+  return n > 0 ? n : 0;
 }

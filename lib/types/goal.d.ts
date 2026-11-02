@@ -104,6 +104,8 @@ export interface GoalWaitResult {
     waited_ms: number;
     continuation_required: boolean;
     needs_user_action?: boolean;
+    /** Set when the optional maxGoalWaits cap ended the supervision chain. */
+    wait_budget_exhausted?: boolean;
     progress?: GoalProgress;
     result?: GoalResult;
     approval?: unknown;

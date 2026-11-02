@@ -10,7 +10,7 @@
 
 **The bridge connects the two sides. It does not replace DSH, modify DSH core, or route DSH model traffic through ChatGPT.**
 
-Published **0.6.0** targets DSH **0.1.7-rc.2** exactly. The unpublished working tree now targets **0.2.0-rc.2**, with local tests and packed official CLI/Web/MCP acceptance passing on 2026-10-08. The package version has not been bumped or republished. See the [current compatibility evidence](docs/dsh-compatibility-2026-10-08.md) and [published-release evidence](docs/dsh-compatibility-2026-09-28.md). After a successful connection, ChatGPT should see **tool count = 23**.
+Published **0.6.0** targets DSH **0.1.7-rc.2** exactly. The unpublished working tree now supports the **0.2.x** host line (**0.2.0-rc.2 through 0.2.1-rc.5**, declared as a compatibility window rather than an exact pin), with local tests, a packed-tarball release gate and a real CLI end-to-end run passing on 0.2.1-rc.5 on 2026-11-03. The package version has not been bumped or republished. See the [current compatibility evidence](docs/dsh-compatibility-2026-11-03.md) and [published-release evidence](docs/dsh-compatibility-2026-09-28.md). After a successful connection, ChatGPT should see **tool count = 26**.
 
 ## Why this exists
 
@@ -50,6 +50,11 @@ You stay in ChatGPT while DSH remains the execution engine.
 
 - create and inspect native DSH sessions;
 - send follow-up instructions without copying context between apps;
+- list the models this DSH profile can actually use, and read or switch the
+  model of **one named session** in place (`dsh_list_models`,
+  `dsh_get_session_model`, `dsh_set_session_model`) — the session id, history,
+  workspace and goal stay the same, and the global default model is never
+  touched (see [model control notes](docs/model-control-2026-10-15.md));
 - start, inspect, update and wait on Goals;
 - approve DSH actions through the bridge when your DSH policy requires it;
 - list registered workspaces and inspect runtime health;
@@ -153,8 +158,12 @@ A healthy first check should look like:
 
 ```text
 bridge version = 0.6.0
-tool count = 23
+tool count = 26
 ```
+
+`tool count = 26` is the full surface. With `disableGoalTools: true` it is 15:
+the 11 supervised-Goal tools are not advertised (see
+[ChatGPT keeps one turn running forever](#chatgpt-keeps-one-turn-running-forever-then-the-connection-drops)).
 
 If health is OK, the version matches, and your registered workspace appears, the control path is ready.
 
@@ -228,6 +237,70 @@ Run the bridge and DSH Web in the same web profile/runtime. Separate runtimes ma
 ### Tool list looks stale
 
 Restart/upgrade the plugin as needed, then refresh/rescan the MCP tools on the ChatGPT side.
+
+### `dsh_list_models` fails with `LLM_UNAVAILABLE`
+
+The bridge must run in the same profile/runtime as DSH so it can read the live
+LLM registry. A bridge started outside a DSH profile has no provider catalog and
+refuses to invent one; no model name is ever hardcoded in the plugin.
+
+### `dsh_set_session_model` reports `MODEL_SWITCH_UNSUPPORTED`
+
+The named session is live in DSH but its model selection is owned by another DSH
+entry point (for example the Web UI), not by the bridge. The bridge refuses
+rather than pretending: it will not cancel or restart that session, and it will
+not create a replacement session to fake a switch.
+
+### The switch was accepted but the answer still looks like the old model
+
+That is the expected, honest state. A model switch applies to the **next**
+request: `dsh_get_session_model` shows the new model under `pending` while
+`last_request` still holds the model that produced the existing turns, until the
+next message is sent. `dsh_set_session_model` returns `accepted`, `saved` and
+the effective state separately for exactly this reason.
+
+### A running task and a model switch
+
+A switch never cancels or restarts running work. When the session is busy the
+new model takes effect from the next assembled request; the bridge never claims
+the running step already used it.
+
+### ChatGPT keeps one turn running forever, then the connection drops
+
+The supervised-Goal protocol asks the model to call `dsh_wait_goal` again and again
+**inside the same assistant turn** while the goal is still active
+(`continuation_required: true`). That is what keeps the conversation on one turn:
+ChatGPT shows "working" for as long as DSH is busy, and on a connector with a hard
+per-turn limit the request eventually times out or drops.
+
+Two plugin config keys bound that loop. Both are off by default:
+
+```yaml
+- id: chatgpt-bridge
+  name: dsh-chatgpt-bridge
+  config:
+    # Hide every supervised-Goal tool: ChatGPT sees only the session tools.
+    disableGoalTools: true
+    # Or keep Goals but cap the continuations per turn (0 = unlimited).
+    maxGoalWaits: 6
+```
+
+- `disableGoalTools: true` removes `dsh_start_goal`, `dsh_wait_goal`,
+  `dsh_wait_until_action_required`, `dsh_create_goal`, `dsh_revise_goal`,
+  `dsh_update_goal`, `dsh_pause_goal`, `dsh_resume_goal`, `dsh_retry_step`,
+  `dsh_rerun_step` and `dsh_stop_goal` from the advertised tool list
+  (`dsh_health` then reports `capabilities.goalSupervision: false`). ChatGPT falls
+  back to `dsh_create_session` + `dsh_send_message` + `dsh_get_task_status` /
+  `dsh_get_result`, which return immediately instead of holding one turn open.
+  Restart DSH Web after changing it; then refresh the tool list in ChatGPT.
+- `maxGoalWaits: N` keeps the Goal tools but returns
+  `continuation_required: false` with `wait_budget_exhausted: true` after `N`
+  consecutive `dsh_wait_goal` calls, and the `next_action` tells the model to end
+  the turn and report progress. Asking for "continue" starts a fresh budget.
+
+`dsh_wait_until_action_required` also belongs to the Goal surface, so
+`disableGoalTools` removes it too; use `dsh_get_task_status` for a single
+non-blocking snapshot instead.
 
 ### Tunnel never starts (`Tunnel: stopped`, `tunnel-health-url-timeout`)
 

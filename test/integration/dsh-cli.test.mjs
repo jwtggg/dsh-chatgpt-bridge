@@ -111,7 +111,7 @@ test('isolated official Web CLI loads bridge, preserves auth/origin and serves M
     }));
     stage = 'MCP tools/list';
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 23);
+    assert.equal(tools.tools.length, 26);
     stage = 'MCP health';
     const health = await client.callTool({ name: 'dsh_health', arguments: {} });
     assert.notEqual(health.isError, true);
@@ -123,8 +123,17 @@ test('isolated official Web CLI loads bridge, preserves auth/origin and serves M
     assert.equal(healthData.bridge.version, require('../../package.json').version);
     assert.equal(healthData.dsh.version, require('@deepseek-ai/dsh/package.json').version);
     assert.equal(healthData.capabilities.agentPresets, true);
-    assert.equal(healthData.capabilities.webSurface, true);
+    // `webSurface` reports whether the OLD apiProxy mux mirror is attached. The
+    // `@deepseek-ai/dsh-host-apiproxy` package that provided it never shipped a
+    // 0.2.x release, so this is false on every supported host — the bridge still
+    // serves approvals and questions through its own userQuestions/approval
+    // seams, which the next assertions cover. Asserting `true` here only ever
+    // held on the pre-0.2 hosts this plugin no longer supports.
+    assert.equal(healthData.capabilities.webSurface, false);
     assert.equal(healthData.capabilities.userQuestions, true);
+    assert.equal(healthData.capabilities.approvals, true);
+    assert.equal(healthData.capabilities.sessionPersistence, true);
+    assert.equal(healthData.capabilities.workspaceRegistry, true);
     stage = 'MCP create with real preset registry';
     const created = resultOf(await client.callTool({ name: 'dsh_create_session', arguments: {
       workspace: 'Bridge contract workspace', title: 'Isolated preset contract',
@@ -135,6 +144,44 @@ test('isolated official Web CLI loads bridge, preserves auth/origin and serves M
     const view = resultOf(await client.callTool({ name: 'dsh_get_session', arguments: { session_id: created.session_id } }));
     assert.equal(view.session_id, created.session_id);
     assert.equal(view.title, 'Isolated preset contract');
+    assert.ok(view.model, 'a session view carries its effective model');
+    stage = 'MCP list models';
+    const catalog = resultOf(await client.callTool({ name: 'dsh_list_models', arguments: {} }));
+    const group = catalog.providers.find((item) => item.provider_id === 'bridge-contract');
+    assert.ok(group, `fixture provider missing from live catalog: ${JSON.stringify(catalog.providers.map((item) => item.provider_id))}`);
+    assert.deepEqual(group.models.map((model) => model.model_id).sort(), ['contract-flash', 'contract-think']);
+    const think = group.models.find((model) => model.model_id === 'contract-think');
+    assert.deepEqual(think.thinking_levels.map((level) => level.id), ['low', 'high']);
+    // Never leaks credential-shaped material through the official host.
+    assert.equal(/api[-_]?key|token|secret/i.test(JSON.stringify(catalog)), false);
+    stage = 'MCP read session model';
+    const modelBefore = resultOf(await client.callTool({ name: 'dsh_get_session_model', arguments: { session_id: created.session_id } }));
+    assert.equal(modelBefore.session_id, created.session_id);
+    assert.equal(modelBefore.live, true);
+    stage = 'MCP switch session model';
+    const switched = resultOf(await client.callTool({ name: 'dsh_set_session_model', arguments: {
+      session_id: created.session_id, provider_id: 'bridge-contract', model_id: 'contract-think', thinking_level: 'high',
+    } }));
+    assert.equal(switched.accepted, true);
+    assert.equal(switched.saved, true);
+    assert.deepEqual(switched.selected, { provider: 'bridge-contract', model: 'contract-think', thinking_level: 'high' });
+    assert.equal(switched.verified.pending_matches, true);
+    stage = 'MCP read back switched model';
+    const modelAfter = resultOf(await client.callTool({ name: 'dsh_get_session_model', arguments: { session_id: created.session_id } }));
+    assert.equal(modelAfter.model, 'contract-think');
+    assert.equal(modelAfter.thinking_level, 'high');
+    assert.equal(modelAfter.effective_from, 'pending');
+    // Same conversation, new model: the session was not recreated.
+    const afterView = resultOf(await client.callTool({ name: 'dsh_get_session', arguments: { session_id: created.session_id } }));
+    assert.equal(afterView.session_id, created.session_id);
+    assert.equal(afterView.title, 'Isolated preset contract');
+    assert.equal(afterView.model.model, 'contract-think');
+    stage = 'MCP switch rejects an invalid model';
+    const rejected = await client.callTool({ name: 'dsh_set_session_model', arguments: {
+      session_id: created.session_id, provider_id: 'bridge-contract', model_id: 'not-a-model',
+    } });
+    assert.equal(rejected.isError, true);
+    assert.equal(JSON.parse(rejected.content[0].text).error.code, 'INVALID_MODEL');
     stage = 'Web HTML';
     const unauthenticated = await fetch(`http://127.0.0.1:${webPort}/`, { signal: AbortSignal.timeout(3000) });
     assert.equal(unauthenticated.status, 401);

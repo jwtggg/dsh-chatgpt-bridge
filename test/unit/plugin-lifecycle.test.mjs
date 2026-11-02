@@ -5,8 +5,24 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, name, Config } from '../../lib/index.js';
-import { createMcpServer } from '../../lib/mcp.js';
+import { createMcpServer, GOAL_TOOLS } from '../../lib/mcp.js';
 import { startHttpServer } from '../../lib/http.js';
+
+/** The exact host this tree was typechecked and integration-verified against. */
+const VERIFIED_DSH_VERSION = '0.2.1-rc.5';
+/**
+ * The compatibility window this plugin declares.
+ *
+ * It must satisfy two INDEPENDENT semver interpretations:
+ *  - DSH's install gate (`evaluatePluginCompatibility`) tests the runtime with
+ *    `includePrerelease: true`;
+ *  - npm/pnpm resolve peer dependencies with plain (prerelease-excluding) rules.
+ * A plain open range such as `>=0.2.0-rc.2 <0.3.0` satisfies the gate but makes
+ * npm reject the very host it must install, because no prerelease counts as
+ * satisfying that range under default semantics. Naming the verified
+ * prereleases explicitly and OR-ing the release line keeps both readers happy.
+ */
+const DSH_COMPAT_WINDOW = '>=0.2.0-rc.2 <=0.2.1-rc.5 || ^0.2.1-rc.5';
 
 const EXPECTED_TOOLS = [
   'dsh_answer_question',
@@ -17,8 +33,10 @@ const EXPECTED_TOOLS = [
   'dsh_credential_status',
   'dsh_get_result',
   'dsh_get_session',
+  'dsh_get_session_model',
   'dsh_get_task_status',
   'dsh_health',
+  'dsh_list_models',
   'dsh_list_sessions',
   'dsh_list_workspaces',
   'dsh_pause_goal',
@@ -27,6 +45,7 @@ const EXPECTED_TOOLS = [
   'dsh_retry_step',
   'dsh_revise_goal',
   'dsh_send_message',
+  'dsh_set_session_model',
   'dsh_start_goal',
   'dsh_stop_goal',
   'dsh_update_goal',
@@ -129,7 +148,63 @@ test('createMcpServer registers all public dsh_* tools (v0.5.0)', () => {
   );
   const names = Object.keys(server._registeredTools).sort();
   assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
-  assert.equal(names.length, 23);
+  assert.equal(names.length, 26);
+});
+
+test('disableGoalTools removes exactly the supervised-Goal tools', () => {
+  const server = createMcpServer(
+    {},
+    {
+      resultMaxChars: 100,
+      resultMaxItems: 10,
+      sessionMaxItems: 5,
+      sessionMaxChars: 100,
+      disableGoalTools: true,
+    },
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  const names = Object.keys(server._registeredTools).sort();
+  const expected = EXPECTED_TOOLS.filter((tool) => !GOAL_TOOLS.includes(tool)).sort();
+  assert.deepEqual(names, expected);
+  assert.equal(names.length, EXPECTED_TOOLS.length - GOAL_TOOLS.length);
+  for (const goalTool of GOAL_TOOLS) {
+    assert.ok(!names.includes(goalTool), `${goalTool} must be hidden when disableGoalTools is set`);
+  }
+  // The plain session surface must survive so ChatGPT can still drive DSH.
+  for (const kept of ['dsh_health', 'dsh_create_session', 'dsh_send_message', 'dsh_get_result']) {
+    assert.ok(names.includes(kept), `${kept} must stay available`);
+  }
+});
+
+test('GOAL_TOOLS names only real registered tools', () => {
+  assert.ok(GOAL_TOOLS.length > 0);
+  for (const name of GOAL_TOOLS) {
+    assert.ok(EXPECTED_TOOLS.includes(name), `${name} is not a registered tool`);
+  }
+});
+
+test('goal-loop guard config resolves with safe defaults', async () => {
+  const { resolveConfig } = await import('../../lib/config.js');
+  const home = mkdtempSync(join(tmpdir(), 'dsh-bridge-config-'));
+  const env = { DSH_HOME: home, USERPROFILE: home };
+  try {
+    const defaults = resolveConfig({}, env);
+    assert.equal(defaults.disableGoalTools, false, 'goal tools stay on by default');
+    assert.equal(defaults.maxGoalWaits, 0, 'no wait cap by default');
+
+    const configured = resolveConfig({ disableGoalTools: true, maxGoalWaits: 3 }, env);
+    assert.equal(configured.disableGoalTools, true);
+    assert.equal(configured.maxGoalWaits, 3);
+
+    assert.equal(resolveConfig({ maxGoalWaits: -5 }, env).maxGoalWaits, 0, 'negative means unlimited');
+    assert.equal(resolveConfig({ maxGoalWaits: 2.9 }, env).maxGoalWaits, 2, 'truncated to an integer');
+
+    const schemaDefaults = Config({});
+    assert.equal(schemaDefaults.disableGoalTools, false);
+    assert.equal(schemaDefaults.maxGoalWaits, 0);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('package clean script is ESM-safe under type:module', () => {
@@ -152,16 +227,41 @@ test('shared DSH host contracts are peers instead of ordinary dependencies', () 
 
 test('package manifest pins the verified npm latest baseline without claiming other prereleases', () => {
   const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  // The host advances through prereleases faster than this plugin publishes.
+  // The manifest therefore declares the verified 0.2.x compatibility WINDOW
+  // (engines.dsh decides alone at install time) instead of one exact rc that
+  // goes stale on the next host release, which is what made DSH refuse to load
+  // the plugin at all. Dev dependencies stay pinned to one concrete host so the
+  // typecheck and integration runs remain reproducible.
   for (const section of ['dependencies', 'devDependencies']) {
     for (const [packageName, version] of Object.entries(manifest[section] ?? {})) {
-      if (packageName.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.2.0-rc.2', `${section}.${packageName}`);
+      if (packageName.startsWith('@deepseek-ai/dsh-')) assert.equal(version, VERIFIED_DSH_VERSION, `${section}.${packageName}`);
     }
   }
+  assert.equal(manifest.engines?.dsh, DSH_COMPAT_WINDOW);
   for (const name of ['agent', 'agent-preset-registry', 'session', 'session-title', 'llm']) {
-    assert.equal(manifest.peerDependencies[`@deepseek-ai/dsh-${name}`], '0.2.0-rc.2');
+    assert.equal(manifest.peerDependencies[`@deepseek-ai/dsh-${name}`], DSH_COMPAT_WINDOW);
     assert.equal(manifest.dependencies[`@deepseek-ai/dsh-${name}`], undefined);
   }
-  assert.equal(manifest.devDependencies['@deepseek-ai/cordis'], '4.0.4');
+  assert.equal(manifest.devDependencies['@deepseek-ai/cordis'], '4.0.5');
+  assert.equal(manifest.peerDependencies['@deepseek-ai/cordis'], '~4.0.5');
+});
+
+test('the declared DSH compatibility window accepts the verified hosts and excludes other majors', async () => {
+  const semver = (await import('semver')).default;
+  // The previous baseline and the host this plugin was re-verified on must both
+  // install without a risk exemption, or the fix has not actually landed.
+  // Assert BOTH interpretations: DSH's gate includes prereleases, npm's peer
+  // resolution does not, and a window that only satisfies one of them breaks
+  // real installations for one of the two installers.
+  for (const version of ['0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.1-rc.6']) {
+    assert.equal(semver.satisfies(version, DSH_COMPAT_WINDOW, { includePrerelease: true }), true, `${version} (dsh gate)`);
+    assert.equal(semver.satisfies(version, DSH_COMPAT_WINDOW), true, `${version} (npm peer resolution)`);
+  }
+  for (const version of ['0.1.7-rc.2', '0.3.0', '1.0.0']) {
+    assert.equal(semver.satisfies(version, DSH_COMPAT_WINDOW, { includePrerelease: true }), false, `${version} (dsh gate)`);
+    assert.equal(semver.satisfies(version, DSH_COMPAT_WINDOW), false, `${version} (npm peer resolution)`);
+  }
 });
 
 test('package.json and package-lock.json carry the same release version', () => {
@@ -197,7 +297,7 @@ test('current README and Goal dogfood stay aligned with the shipped control-plan
   const dogfood = readFileSync(new URL('../../scripts/goal-control-dogfood.mjs', import.meta.url), 'utf8');
 
   assert.match(readme, new RegExp(`v${manifest.version.replaceAll('.', '\\.')}`));
-  assert.match(readme, /tool count = 23/);
+  assert.match(readme, /tool count = 26/);
   assert.match(dogfood, new RegExp(`version:\\s*['"]${manifest.version.replaceAll('.', '\\.')}['"]`));
   assert.match(dogfood, /dsh_create_goal/);
   assert.match(dogfood, /dsh_wait_until_action_required/);

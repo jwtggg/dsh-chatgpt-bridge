@@ -21,6 +21,8 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     resultMaxItems: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     sessionMaxItems: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     sessionMaxChars: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    disableGoalTools: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    maxGoalWaits: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     logLevel: import("@deepseek-ai/schemastery").default<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn", "defined">;
     approvalPolicy: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<NoInfer<{
         read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask", "defined">;
@@ -59,6 +61,8 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     resultMaxItems: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     sessionMaxItems: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     sessionMaxChars: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    disableGoalTools: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    maxGoalWaits: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     logLevel: import("@deepseek-ai/schemastery").default<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn", "defined">;
     approvalPolicy: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<NoInfer<{
         read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask", "defined">;
