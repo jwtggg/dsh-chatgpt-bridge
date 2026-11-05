@@ -16,7 +16,7 @@ every host it was typechecked against.
 Install from this repository rather than from npm:
 
 ```bash
-dsh plugin --profile desktop add git+https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git#main
+dsh plugin --profile desktop add git+https://github.com/jwtggg/dsh-chatgpt-bridge.git#main
 ```
 
 `lib/` is committed, so a git install needs no build step.
