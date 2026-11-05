@@ -1,6 +1,6 @@
 {
   "name": "dsh-chatgpt-bridge",
-  "version": "0.6.0",
+  "version": "0.6.0-modi.1",
   "description": "MCP bridge: lets ChatGPT Web create, view, continue and control DeepSeek Harness (DSH) agent sessions through the official MCP protocol. The bridge only connects; DSH keeps its session, agent, tool, approval and workspace security model.",
   "type": "module",
   "main": "./lib/index.js",

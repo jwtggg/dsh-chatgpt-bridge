@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0-modi.1 — 2026-11-06
+
+Custom build: this version number is the marker for the locally maintained fix
+release, not an npm release. It carries the DSH 0.2.1 compatibility work below,
+which the published `0.6.0` does not have.
+
+Why it exists: the install gate decides compatibility from the manifest alone.
+Published `0.6.0` pins five `@deepseek-ai/dsh-*` peers to the exact
+`0.1.7-rc.2` / `0.2.0-rc.2` host, so any later DSH release — including
+`0.2.1-rc.2` and `0.2.1-rc.5` — rejects the plugin outright before any of its
+code runs. Declaring the verified window instead makes one artifact loadable on
+every host it was typechecked against.
+
+Install from this repository rather than from npm:
+
+```bash
+dsh plugin --profile desktop add git+https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git#main
+```
+
+`lib/` is committed, so a git install needs no build step.
+
 ## Unreleased — DSH 0.2.1-rc.5 compatibility
 
 DSH 0.2.1-rc.5 refused to load the published 0.6.0 plugin outright:
