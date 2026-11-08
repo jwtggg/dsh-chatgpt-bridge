@@ -137,6 +137,66 @@ test('routes: missing custom header denied', async () => {
   assert.ok(res.body.includes('bad-header'));
 });
 
+// The DSH Desktop shell proxies dsh-app://app requests to the Host and strips
+// the Origin header in the process. Before this regression test, a missing
+// Origin was treated as hostile, so every settings save on Desktop failed with
+// 403 bad-origin while GET (which does not check Origin) kept working.
+test('routes: Desktop-proxied mutation without Origin is allowed', async () => {
+  const { getRoute } = await setup();
+  const base = validMutation('/_dsh/chatgpt-bridge/config', '{"tunnel":{"tunnelId":"tunnel_test"}}');
+  const headers = { ...base.headers };
+  delete headers.origin;
+  const req = makeReq({ ...base, method: 'PUT', headers });
+  const res = await call(getRoute(), req, makeRes());
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.includes('"ok":true'));
+});
+
+test('routes: Desktop dsh-app Origin is allowed', async () => {
+  const { getRoute } = await setup();
+  const base = validMutation('/_dsh/chatgpt-bridge/config', '{"tunnel":{"tunnelId":"tunnel_test"}}');
+  const req = makeReq({
+    ...base,
+    method: 'PUT',
+    headers: { ...base.headers, origin: 'dsh-app://app' },
+  });
+  const res = await call(getRoute(), req, makeRes());
+  assert.equal(res.statusCode, 200);
+});
+
+// Allowing a missing Origin must not become a blanket bypass: without the CSRF
+// header a stripped-Origin request is still refused.
+test('routes: missing Origin still requires the CSRF header', async () => {
+  const { getRoute } = await setup();
+  const req = makeReq({
+    method: 'PUT',
+    url: '/_dsh/chatgpt-bridge/config',
+    headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+    body: '{"tunnel":{"tunnelId":"tunnel_test"}}',
+  });
+  const res = await call(getRoute(), req, makeRes());
+  assert.equal(res.statusCode, 403);
+  assert.ok(res.body.includes('bad-header'));
+});
+
+test('routes: CORS preflight from Desktop origin is answered', async () => {
+  const { getRoute } = await setup();
+  const req = makeReq({
+    method: 'OPTIONS',
+    url: '/_dsh/chatgpt-bridge/config',
+    headers: {
+      host: '127.0.0.1:3080',
+      origin: 'dsh-app://app',
+      'access-control-request-method': 'PUT',
+      'access-control-request-headers': 'content-type,x-dsh-chatgpt-bridge',
+    },
+  });
+  const res = await call(getRoute(), req, makeRes());
+  assert.equal(res.statusCode, 204);
+  assert.equal(res.headers['Access-Control-Allow-Origin'], 'dsh-app://app');
+  assert.ok(String(res.headers['Access-Control-Allow-Headers']).includes(MUTATION_HEADER));
+});
+
 test('routes: bad content-type denied', async () => {
   const { getRoute } = await setup();
   const req = makeReq({

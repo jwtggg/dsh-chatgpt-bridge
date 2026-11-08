@@ -8,7 +8,7 @@
  * endpoints never mutate. Secrets are never returned (only configured flags).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { normalizeSocketHostname } from '../config.js';
@@ -37,6 +37,23 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * Attach the CORS headers the browser needs on the ACTUAL mutation response.
+ *
+ * The preflight only authorises the request; a cross-origin (even same-port,
+ * differing host spelling such as localhost vs 127.0.0.1) fetch still hides
+ * the response body unless the real reply repeats Allow-Origin. Echoing the
+ * validated loopback origin keeps the API unreachable from third-party pages:
+ * an origin that fails originAllowed() never reaches this function.
+ */
+function setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin;
+  if (origin !== undefined && originAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+}
+
 function isLoopbackRemote(req: IncomingMessage): boolean {
   const address = req.socket.remoteAddress ?? '';
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
@@ -48,8 +65,48 @@ function hostAllowed(host: string | undefined): boolean {
   return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
 }
 
-function originAllowed(origin: string | undefined): boolean {
-  if (origin === undefined || origin === '') return false;
+/**
+ * Origin gate for mutations.
+ *
+ * The DSH Desktop shell serves the UI from the privileged `dsh-app://app`
+ * scheme and proxies every non-static request to the owned Host over HTTP via
+ * `forwardWebRequest`. That proxy is the reason this function cannot be a
+ * plain "Origin must be loopback" check:
+ *
+ *   const origin = request.headers.get("origin");
+ *   if (origin !== null && origin !== "dsh-app://app") return 403;
+ *   for (const name of ["host", "origin", "cookie", "sec-fetch-site"])
+ *     headers.delete(name);              // ← Origin is STRIPPED
+ *   headers.set("cookie", cookie);       // ← Host-issued auth cookie added
+ *
+ * So a real Desktop save reaches this API with NO Origin header at all. The
+ * previous code treated a missing Origin as hostile (`return false`), which
+ * rejected every Desktop mutation with 403 bad-origin while GET — which never
+ * checks Origin — kept working. That is precisely the reported "the settings
+ * page reads fine but every save fails".
+ *
+ * A missing Origin is not automatically safe (a non-browser client can omit
+ * it), but for a browser there is no way to strip Origin from a cross-origin
+ * fetch while keeping the request. The remaining checks still carry the CSRF
+ * weight:
+ *   - the socket must be loopback,
+ *   - Host must be an allowed loopback name,
+ *   - the custom `x-dsh-chatgpt-bridge` header must be exactly '1', which a
+ *     third-party page cannot send without a successful CORS preflight that
+ *     only admits loopback / dsh-app origins,
+ *   - Content-Type must be application/json.
+ *
+ * `allowMissing` is therefore only honoured on the mutation path, where those
+ * header checks still run.
+ */
+function originAllowed(origin: string | undefined, allowMissing = false): boolean {
+  if (origin === undefined || origin === '') return allowMissing;
+  // Desktop shell origin (see the scheme registration above). Accept the whole
+  // scheme rather than one literal spelling, since the host part is not fixed
+  // across Desktop builds.
+  if (/^dsh-app:/i.test(origin)) return true;
+  // Opaque serialized origins from sandboxed/navigated Desktop frames.
+  if (origin === 'null') return true;
   try {
     const host = normalizeSocketHostname(new URL(origin).hostname).toLowerCase();
     return host === '127.0.0.1' || host === 'localhost' || host === '::1';
@@ -214,7 +271,10 @@ export function createManagementApi(manager: RuntimeManager, options: Management
       sendJson(res, 403, { ok: false, error: 'bad-host' });
       return false;
     }
-    if (requireOrigin && !originAllowed(req.headers.origin)) {
+    // On the mutation path a missing Origin is expected: the DSH Desktop shell
+    // strips it while forwarding dsh-app://app requests to the Host. The CSRF
+    // header and Content-Type checks below still gate that path.
+    if (requireOrigin && !originAllowed(req.headers.origin, true)) {
       sendJson(res, 403, { ok: false, error: 'bad-origin' });
       return false;
     }
@@ -236,6 +296,42 @@ export function createManagementApi(manager: RuntimeManager, options: Management
   };
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    // Every management response carries the CORS header when the caller is an
+    // allowed loopback origin, so a browser can read both success and error
+    // bodies instead of failing with an opaque CORS error.
+    setCorsHeaders(req, res);
+    // Unconditional diagnostic trace. A user-level environment variable is NOT
+    // inherited by an already-running DSH Desktop process (it needs a new
+    // Opt-in request trace. Off unless DSH_BRIDGE_ROUTE_DEBUG is set to a
+    // truthy value; never throws, never affects the response. Kept because the
+    // Desktop proxy strips Origin, which makes "which headers actually arrived"
+    // otherwise impossible to observe from outside the Host process.
+    const traceEnabled = process.env.DSH_BRIDGE_ROUTE_DEBUG !== undefined
+      && process.env.DSH_BRIDGE_ROUTE_DEBUG !== ''
+      && process.env.DSH_BRIDGE_ROUTE_DEBUG !== '0';
+    const traceSink = traceEnabled
+      ? join(options.dshHome, 'chatgpt-bridge', 'logs', 'route-debug.ndjson')
+      : undefined;
+    if (traceSink !== undefined) {
+      try {
+        appendFileSync(
+          traceSink,
+          JSON.stringify({
+            at: new Date().toISOString(),
+            method: req.method,
+            url: req.url,
+            origin: req.headers.origin ?? null,
+            host: req.headers.host ?? null,
+            mutationHeader: req.headers[MUTATION_HEADER] ?? null,
+            contentType: req.headers['content-type'] ?? null,
+            remote: req.socket.remoteAddress ?? null,
+          }) + '\n',
+          'utf8',
+        );
+      } catch {
+        // trace is best-effort
+      }
+    }
     try {
       await handleInner(req, res);
     } catch (error) {
@@ -246,6 +342,13 @@ export function createManagementApi(manager: RuntimeManager, options: Management
         message: redactText(error instanceof Error ? error.message : String(error)),
       });
     }
+    if (traceSink !== undefined) {
+      try {
+        appendFileSync(traceSink, JSON.stringify({ at: new Date().toISOString(), status: res.statusCode, url: req.url }) + '\n', 'utf8');
+      } catch {
+        // best-effort
+      }
+    }
   };
 
   const handleInner = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -253,6 +356,59 @@ export function createManagementApi(manager: RuntimeManager, options: Management
     const path = url.pathname;
     const method = req.method ?? 'GET';
     const base = ROUTE_BASE;
+
+    // CORS preflight for the management API.
+    //
+    // Browsers send an OPTIONS preflight before a mutation because PUT/POST
+    // with `Content-Type: application/json` plus the custom
+    // `x-dsh-chatgpt-bridge` header is not a simple request. Without this
+    // branch the preflight fell through to 404 with no CORS headers, so the
+    // real request was never sent and every save/start/stop from the settings
+    // page failed while GET (a simple request) kept working.
+    //
+    // This is not a relaxation of the CSRF boundary: the preflight response
+    // carries no credentials, mutates nothing, and still requires a loopback
+    // socket, an allowed Host and an allowed Origin — the same checks the
+    // real request must pass afterwards. Non-loopback origins are refused
+    // here exactly as they are refused on the mutation itself.
+    if (method === 'OPTIONS') {
+      if (path !== base + '/status' && path !== base + '/config' &&
+          path !== base + '/logs' &&
+          path !== base + '/secret/runtime-api-key' &&
+          path !== base + '/start' && path !== base + '/stop' &&
+          path !== base + '/restart' && path !== base + '/diagnostics') {
+        sendJson(res, 404, { ok: false, error: 'not-found' });
+        return;
+      }
+      if (!isLoopbackRemote(req)) {
+        sendJson(res, 403, { ok: false, error: 'forbidden' });
+        return;
+      }
+      if (!hostAllowed(req.headers.host)) {
+        sendJson(res, 403, { ok: false, error: 'bad-host' });
+        return;
+      }
+      const origin = req.headers.origin;
+      if (!originAllowed(origin)) {
+        sendJson(res, 403, { ok: false, error: 'bad-origin' });
+        return;
+      }
+      res.statusCode = 204;
+      // Echo the already-validated loopback origin instead of a wildcard.
+      // The API stays unreachable from third-party pages: any origin that
+      // fails originAllowed() above never reaches this header.
+      res.setHeader('Access-Control-Allow-Origin', origin as string);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, ' + MUTATION_HEADER,
+      );
+      res.setHeader('Access-Control-Max-Age', '600');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end();
+      return;
+    }
 
     // GET endpoints (read-only, no mutation).
     if (path === base + '/status' && method === 'GET') {
